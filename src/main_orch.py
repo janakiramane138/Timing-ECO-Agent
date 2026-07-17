@@ -37,10 +37,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 workdir = str(_REPO_ROOT) + "/"
 ASAP7_PDK = _os.environ.get("ASAP7_PDK", str(_REPO_ROOT / "asap7"))
 
+# OpenROAD binary — resolved from the environment so no source edit is needed.
+# Set OPENROAD_BIN to an absolute path to a local build, or leave it unset to
+# use whatever `openroad` is on PATH (e.g. an OpenROAD-flow-scripts install).
 OpenROAD_bin = "/data/jethiraj/OpenROAD/build/bin/openroad"
-#OpenROAD_bin = "/usr/local/bin/openroad"
-OpenROAD_design_tcl = f"{workdir}/OpenROAD_utils/OpenROAD_load_design_JPEG_RDF_70_400.tcl"
-OpenROAD_design_tcl_best = f"{workdir}/OpenROAD_utils/OpenROAD_load_design_JPEG_RDF_70_400_best.tcl"
+#OpenROAD_bin = _os.environ.get("OPENROAD_BIN", "openroad")
+OpenROAD_design_tcl = f"{workdir}/OpenROAD_utils/OpenROAD_load_design.tcl"
+OpenROAD_design_tcl_best = f"{workdir}/OpenROAD_utils/OpenROAD_load_design_best.tcl"
 
 ECO_out = f"{workdir}/prompts/dynamic/llm_eco.tcl"
 ANALYSIS_out = f"{workdir}/prompts/dynamic/llm_analysis.md"
@@ -2460,7 +2463,7 @@ def run_loop(loop_max=48):
                 proc = restart_openroad_from_odb(BEST_GRT_ODB)
                 _grt_load_tcl = generate_load_tcl_for(
                     BEST_GRT_ODB,
-                    f"{workdir}/OpenROAD_utils/OpenROAD_load_design_JPEG_RDF_70_400_best.tcl")
+                    f"{workdir}/OpenROAD_utils/OpenROAD_load_design_best.tcl")
                 send(proc, f"source {_grt_load_tcl}\nputs {PARA}\n")
                 wait_for_sentinel(proc)
                 send(proc, NODE_NET_TCL_BLOCK)

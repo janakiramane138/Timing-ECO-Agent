@@ -1,3 +1,16 @@
+# Python
 __pycache__/
 *.pyc
 parsers_old/
+
+# Local Claude Code state (per-machine, not shared)
+.claude/
+
+# Per-run artifacts produced by the ECO loop
+prompts/dynamic/
+prompts/wns_llmcalls.txt
+prompts/slack_history.png
+prompts/history.json
+prompts/run_history.json
+prompts/eco_history.json
+outputs/

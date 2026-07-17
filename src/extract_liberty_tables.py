@@ -17,17 +17,26 @@ output file is treated as data, not generated artifact.
 from __future__ import annotations
 import gzip
 import math
+import os
 import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration — repo-relative paths (no hardcoded absolutes).
+#
+# This file lives at <repo>/src/extract_liberty_tables.py; the repo root is
+# one level up. LIB_DIR points at the bundled ASAP7 NLDM Liberty directory;
+# override it with the ASAP7_PDK environment variable to target a different
+# PDK. Re-run this script once per technology (see the repo README).
 # ---------------------------------------------------------------------------
 
-LIB_DIR = Path("/asap7/lib/NLDM")
-OUTPUT  = Path("/prompts/static/cell_delay_reference.toon")
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_PDK_ROOT = Path(os.environ.get("ASAP7_PDK", _REPO_ROOT / "asap7"))
+
+LIB_DIR = _PDK_ROOT / "lib" / "NLDM"
+OUTPUT  = _REPO_ROOT / "prompts" / "static" / "cell_delay_reference.toon"
 
 # Only TT corner — matches what OpenROAD loads for STA in this flow.
 LIB_PATTERN = "*{group}_{vt}_{corner}_nldm_*.lib*"

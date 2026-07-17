@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LLM driver: builds a compact prompt from context_v5.toon + run_history.json,
+"""LLM driver: builds a compact prompt from context.toon + run_history.json,
 calls `claude -p --output-format json` with that prompt, and writes sanitized
 Tcl ECO commands to llm_eco.tcl.
 
@@ -22,7 +22,7 @@ except ImportError:
     anthropic = None  # SDK is optional; only required when call_claude_api() is used
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-STATIC_GUIDE_FILE = ROOT_DIR / "AGENTS.md"
+STATIC_GUIDE_FILE = ROOT_DIR / "prompts" / "AGENTS.md"
 FEW_SHOT_FILE = ROOT_DIR / "prompts" / "static" / "few_shot" / "few_shot.toon"
 CELL_DELAY_REFERENCE_FILE = ROOT_DIR / "prompts" / "static" / "cell_delay_reference.toon"
 BACKTRACE_NOTICE_FILE = ROOT_DIR / "prompts" / "dynamic" / "backtrace_notice.json"

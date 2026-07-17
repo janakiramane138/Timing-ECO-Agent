@@ -1,5 +1,5 @@
 ########################################################################
-# ECO Procs for LLM-driven Timing Repair  (v7 — simplified)
+# ECO Procs for LLM-driven Timing Repair 
 #
 # Source once into OpenROAD after the design is loaded.
 #
@@ -12,24 +12,12 @@
 # Tcl quoting: names with $, [, ] MUST be braced at the call site, e.g.
 #   eco_insert_buffer _00623_ {sa12_sr[0]$_DFF_P_/QN} BUFx4_ASAP7_75t_L b1
 #
-# OpenROAD object model used here (mini-glossary):
-#   dbInst     — a placed gate (has master, location in DBU, ITerms)
-#   dbMaster   — a library cell (e.g., BUFx4_ASAP7_75t_SL)
-#   dbMTerm    — a pin DEFINITION on a master (name + IoType)
-#   dbITerm    — an Instance Terminal: pin on a specific dbInst
-#   dbBTerm    — a Block Terminal: a top-level design port
-#   dbNet      — a net; reachable ITerms via getITerms, ports via getBTerms
-#
-# The STA pin graph (get_pins) can go stale after an ECO insert/delete.
-# ODB is always the source of truth — these procs walk ODB for sink
-# enumeration and bridge via sta::sta_to_db_inst / sta::sta_to_db_net.
-#
 # Design principle: these procs are *mechanical mutators*. All timing
 # judgement (which gate to resize, which sinks to clone off, whether a
 # buffer is safe to remove) is the caller's responsibility — the LLM
 # does that from the timing report. Matches how repair_timing separates
 # its doMove() routines from the repair loop that decides when to call.
-########################################################################
+#######################################################################
 
 
 # ----------------------------------------------------------------------

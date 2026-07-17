@@ -1,0 +1,12 @@
+# Python dependencies for the Timing-ECO-Agent orchestrator.
+#   pip install -r requirements.txt
+#
+# Note: the agent shells out to the `claude` CLI (installed separately, see
+# README) rather than importing the Anthropic SDK in the main loop. The
+# `anthropic` package is an OPTIONAL fallback used only by
+# LLM_call.call_claude_api(); uncomment it if you use that path.
+
+matplotlib>=3.5
+numpy>=1.21
+
+# anthropic>=0.40        # optional: only for the SDK-based call path
