@@ -2,14 +2,14 @@
 
 An LLM-driven **post-place-and-route timing ECO** (Engineering Change Order)
 agent. It closes setup-timing violations on a routed design by iterating a
-closed loop between [OpenROAD](https://github.com/The-OpenROAD-Project/OpenROAD)
+closed loop between [EDA tool](https://github.com/The-OpenROAD-Project/OpenROAD)
 and a large language model (Anthropic Claude, via the `claude` CLI):
 
 ```
           ┌──────────────────────────────────────────────────────────┐
           │                      per iteration                        │
           │                                                           │
-  OpenROAD ──► timing report + node/net/parasitic context ──► LLM     │
+  EDA tool ──► timing report + node/net/parasitic context ──► LLM     │
     ▲                                                          │      │
     │                                                          ▼      │
     └────────── incremental place + route + STA ◄── ECO Tcl (resize / │
@@ -26,26 +26,24 @@ change, and keeps the best-ever database. It periodically runs full detailed
 routing + parasitic extraction (SPEF) so the model's predictions stay
 calibrated against real post-route RC.
 
-The bundled reference design is **JPEG_RDF** on the **ASAP7** PDK.
-
 ---
 
 ## Repository layout
 
 | Path | Purpose |
 |------|---------|
-| `src/main_orch.py` | Main orchestrator — the OpenROAD ↔ LLM ECO loop, scoring, revert/backtrace, finals. |
+| `src/main_orch.py` | Main orchestrator — the EDA tool ↔ LLM ECO loop, scoring, revert/backtrace, finals. |
 | `src/LLM_call.py` | LLM driver — builds the prompt, calls the `claude` CLI, sanitizes the returned Tcl. |
-| `src/context_builder.py` | Emits the per-iteration TOON context from timing/node/net files. |
+| `src/context_builder.py` | Emits the per-iteration design state context from timing/node/net files. |
 | `src/extract_liberty_tables.py` | Builds the Liberty cell-delay reference (see [Onboarding a new PDK](#onboarding-a-new-pdk)). |
 | `src/parsers/` | Timing-report and Liberty parsing helpers. |
 | `OpenROAD_utils/OpenROAD_load_design.tcl` | Loads the design checkpoint + PDK into OpenROAD (see [Onboarding a new EDA tool](#onboarding-a-new-eda-tool)). |
-| `OpenROAD_utils/eco_procs.tcl` | Mechanical ECO mutators (`eco_resize_gate`, `eco_insert_buffer`, `eco_clone_gate`, …). |
-| `prompts/AGENTS.md` | Durable LLM strategy guide (loaded into the system prompt). |
-| `prompts/static/cell_delay_reference.toon` | Cached Liberty cell-delay reference for the active PDK. |
+| `OpenROAD_utils/eco_procs.tcl` | gate level ECO commands procs (`eco_resize_gate`, `eco_insert_buffer`, `eco_clone_gate`, …). |
+| `prompts/AGENTS.md` | Strategy guide (loaded into the system prompt). |
+| `prompts/static/cell_delay_reference.toon` | Liberty cell-delay reference for the active PDK. |
 | `prompts/static/few_shot/few_shot.toon` | Worked ECO example injected into the system prompt. |
 | `asap7/` | Bundled ASAP7 PDK subset (LEF, NLDM Liberty, `setRC.tcl`, RCX rules). |
-| `benchmark/JPEG_RDF/` | Bundled routed JPEG_RDF design checkpoints (`6_final.odb/.sdc/.spef`, …). |
+| `benchmark/` | Detailed routed design checkpoints (`6_final.odb/.sdc/.spef`, …). |
 
 ---
 
