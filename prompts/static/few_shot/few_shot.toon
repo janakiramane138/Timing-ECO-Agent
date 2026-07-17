@@ -1,0 +1,541 @@
+FEW-SHOT EXAMPLE — How a P&R engineer reasons through one ECO iteration.
+Real path from an ibex/ASAP7 run. Demonstrates the THINKING, not the result.
+Use this as a template — follow the same step sequence on the iteration_context
+you will be given below this example.
+
+## STEP 1 — Establish the failure
+Always read these scalars first. They frame the entire iteration.
+
+  wns_slack_ps      = -285.55       # worst setup slack we must close
+  tns_ps            = -328105       # total negative slack — TNS reductions
+                                      compound across all violating endpoints
+  clock_period_ps   = 700           # baseline budget
+  num_violating_endpoints = 5       # we get top-5 paths in path[]
+
+Setup-slack target each iter: improve WNS by 1-5ps WITHOUT degrading TNS by
+more than the WNS gain × num_endpoints. A move that fixes WNS by +3 but
+pushes 4 other endpoints down 2ps each is a net loss.
+
+## STEP 2 — Enumerate the top-5 paths and check for shared prefix
+From the path[] block we look at the startpoint of each path and the first
+few stages. If multiple paths share the early cells, one move on a shared
+stage helps multiple endpoints — highest leverage.
+
+  path1: slack=-285.55 startpoint=if_stage_i.instr_rdata_id_o[16]/QN  endpoint=instr_addr_o[21]
+  path2: slack=-284.74 startpoint=if_stage_i.instr_rdata_id_o[16]/QN  endpoint=instr_addr_o[28]
+  path3: slack=-284.21 startpoint=if_stage_i.instr_rdata_id_o[16]/QN  endpoint=instr_addr_o[19]
+  path4: slack=-283.95 startpoint=if_stage_i.instr_rdata_id_o[15]/QN  endpoint=instr_addr_o[11]
+  path5: slack=-283.10 startpoint=if_stage_i.instr_rdata_id_o[16]/QN  endpoint=instr_addr_o[29]
+
+Observation: 4 of 5 paths share startpoint instr_rdata_id_o[16]/QN.
+on_other_violating_paths column in path[] confirms which stages are shared.
+Stages with on_other_violating_paths >= 3 = shared by most paths = leverage.
+A move on such a stage scales by ~4x: one +2ps fix helps 4 violating endpoints.
+
+## STEP 2.5 — Familiarize with the <cell_delay_reference> block
+Before doing any arithmetic, recognize that the system prompt contains a
+<cell_delay_reference> block listing Liberty NLDM cell_delay and out_slew
+data for every combinational cell in this technology. ALWAYS look up the
+actual numbers from this table instead of guessing scaling ratios.
+
+Reading the table:
+  - Each cell has a "drive ladder" line showing all sizes within a VT.
+    E.g. `SL drive ladder: x2(ic=0.566) → x3(ic=0.677) → ...`
+  - Per-cell rows show: `<cell>_<VT> is=<slew>: d1/s1 d2/s2 d3/s3 d4/s4`
+    where the 4 columns correspond to load=[1.5, 5, 15, 40] ff.
+  - To estimate at YOUR stage's (load, slew) point: locate the nearest
+    two slew rows and nearest two load columns, bilinearly interpolate.
+  - For VT swap predictions: compare same drive (e.g. x6f) across L/R/SL.
+
+Use the reference table for ALL Δcell_delay and Δout_slew predictions in
+the cascade arithmetic of Step 5 — never guess.
+
+## STEP 2.6 — Familiarize with <nearby_endpoints> and <shared_cells_to_nearby>
+Below path[] you have two MORE blocks the model MUST consult before any
+move that perturbs upstream load (resize, clone, buffer insert/remove):
+
+  nearby_endpoints[N]{rank, startpoint, endpoint, slack_ps, n_shared_with_top5}:
+    Ranks 6..50 — paths just outside the top-5 window. The slack column
+    shows how close each is to becoming the new WNS.
+
+  shared_cells_to_nearby[M]{inst, n_nearby_paths, nearby_path_ranks, worst_nearby_slack_ps}:
+    Per top-5 instance that also appears on nearby paths — the cascade graph.
+    If you touch that inst, those nearby paths get perturbed.
+
+Use these to predict sibling-tip risk:
+  - Look up your candidate instance X in shared_cells_to_nearby.
+  - If X has worst_nearby_slack_ps within 3 ps of WNS, your move risks
+    tipping that path. Compare your predicted ΔWNS gain on the targeted
+    path vs the potential loss on the worst nearby before committing.
+  - Example: WNS=-78.5. X appears on nearby paths [6,8,12] with
+    worst_nearby_slack_ps=-76.5 (2 ps headroom). If your upsize gains
+    +2.0 ps on the targeted path BUT pushes path 6 down by -3 ps, you are
+    creating a new WNS at -79.5 ps. Net loss.
+
+Iter-3 and iter-10 regressions on prior runs were exactly this pattern.
+
+## STEP 3 — Walk path 1 stage-by-stage; flag the large delays AND removal candidates
+Two parallel scans:
+
+  (i) Flag large-delay stages: cell_delay_ps > 15 OR wire_delay_ps > 5.
+      These need resize / VT swap / structural attention.
+
+  (ii) Flag REMOVAL CANDIDATES: any BUFx*/INVx* with
+       load_cap_ff < 2.0 AND cell_delay_ps > 10 AND fanout <= 2.
+      These are buffers whose own delay exceeds what their removal would cost
+      upstream. Regardless of name prefix (place*, rebuffer*, output*, eco_*).
+      Output-port buffers (output*) almost always qualify — they exist for
+      synthesis hygiene, not load-bearing reasons.
+
+Rule: flag any stage where cell_delay_ps > 15 OR wire_delay_ps > 5.
+Sample rows (path[] gives 67 stages for this path; below are the early ones):
+
+stage  driver_pin              cell                     fanout  load_ff  wire_cap  in_slew  out_slew  cell_d  wire_d  wire_len  oovp  vt_swap_avail
+1.1   instr_rdata_id_o[16]/QN  DFFHQNx3_ASAP7_75t_SL     4      6.07     0.54      20.9     31.03     50.88   0.23    2.16      4    -                 # DFF, dont_touch — skip
+1.2   place7071/Y              BUFx6f_ASAP7_75t_SL       6      11.57    4.84      31.04    17.21     18.75   5.98    18.14     4    -                 # ← LARGE wire_delay AND cell_delay
+1.3   place7069/Y              BUFx8_ASAP7_75t_SL        10     17.17    8.01      24.85    21.73     23.34   11.57   29.43     4    -                 # ← VERY LARGE wire, fanout=10
+1.4   place7068/Y              BUFx6f_ASAP7_75t_SL       4      3.70     0.77      41.9     9.5       18.54   0.57    3.24      4    -                 # ← input slew is HUGE (41.9ps)
+1.5   place7067/Y              BUFx3_ASAP7_75t_SL        7      5.53     2.24      9.65     14.7      16.03   1.02    6.70      4    -                 # ← upsize available, fanout=7
+1.6   _31346_/Y                OA211x2_ASAP7_75t_SL      1      0.73     0.10      14.92    12.5      26.74   0.04    0.27      4    -                 # ← LARGE cell_d at tiny load
+1.7   _31347_/Y                OR3x4_ASAP7_75t_SL        1      0.81     0.20      12.5     15.53     29.56   0.09    0.76      4    -                 # ← LARGE cell_d at tiny load
+1.8   _31348_/Y                AND3x2_ASAP7_75t_L        1      1.97     1.36      15.53    9.99      18.28   0.50    8.37      4    SL@0.638          # ← L-VT, swap candidate
+1.11  _31350_/Y                INVx1_ASAP7_75t_L         2      1.27     0.20      13.81    13.55     10.02   0.11    1.08      4    SL@0.667          # ← L-VT, swap candidate
+1.12  _19545_/Y                AO22x1_ASAP7_75t_L        1      0.66     0.14      13.55    10.89     17.18   0.06    0.70      4    SL@0.455          # ← L-VT, swap candidate
+
+## STEP 4 — For each flagged stage, diagnose WHY it is slow
+Classify the cause: wire-dominated, cell-dominated, slew-cascade, oversized,
+or VT-driven. The diagnosis dictates the move type.
+
+Stage 1.2 (place7071/Y BUFx6f, cell_d=18.75, wire_d=5.98, wire_len=18.14um):
+  - wire_d/cell_d = 0.32 → cell-dominated by ratio
+  - BUT 18um wire + load_cap 11.57ff at fanout 6 says wire is a real factor
+  - in_slew is 31ps (high) and out_slew is 17 (improved by driver) — driver IS doing work
+  - DIAGNOSIS: cell-dominated; current driver is BUFx6f, upsize options are
+    BUFx8/10/12/12f/16f available in the upsize column (input_caps 0.915/1.302/1.301/2.532/2.533).
+
+Stage 1.3 (place7069/Y BUFx8, fanout=10, load=17.17ff, wire_d=11.57ps, wire_len=29.43um):
+  - wire_d > cell_d → WIRE-DOMINATED
+  - load_cap 17.17ff at fanout=10 + 29um wire run
+  - DIAGNOSIS: wire-dominated. Two viable moves:
+      (a) eco_clone_gate_worst_half: split fanout 10 → 5+5, each branch with shorter wire
+      (b) eco_insert_buffer: break the 29um net at its midpoint
+    Compute which is cheaper (see Step 5/6).
+
+Stage 1.4 (place7068/Y BUFx6f, in_slew=41.9ps, out_slew=9.5ps):
+  - in_slew is 41.9ps — the UPSTREAM driver (stage 1.3) is feeding a very slow edge
+  - this stage's cell_delay (18.54) is inflated BECAUSE of the slow in_slew
+  - DIAGNOSIS: SLEW-CASCADE. Do NOT touch stage 1.4. Fix stage 1.3 (the slew-source).
+
+Stage 1.6 (_31346_/Y OA211x2_SL, cell_d=26.74, load=0.73ff, fanout=1):
+  - load is tiny, fanout=1, yet cell_delay is huge
+  - in_slew was 14.92ps (normal) and out_slew is 12.5 (low) — not slew-cascaded
+  - This is an OA211x2 of size 2 already; no further upsize without changing cell type
+  - load=0.73ff is so small that upsizing the DRIVER won't help — the cell delay
+    formula is roughly Tcell ≈ K1 + K2*Cload. K2*Cload is small here, so the
+    intrinsic K1 dominates. Upsizing the cell increases K2 but only marginally helps K1.
+  - DIAGNOSIS: cell-intrinsic-limited. Marginal-return move — DEFER.
+
+Stage 1.8/1.11/1.12 (_31348_, _31350_, _19545_  ending in _L):
+  - L-VT (Low-Vth) variants. Slower than SL because L is the "leakage-low" corner.
+    naming convention in ASAP7: SL = Super-Low-Vth (fastest), L = Low-Vth (medium),
+    R = Regular-Vth (slowest). So L is SLOWER than SL.
+  - vt_swap column shows the SL variant is available (AND3x2_SL@0.638, INVx1_SL@0.667 etc.)
+  - Δinput_cap of swap is < 5% — upstream sees negligible additional load
+  - DIAGNOSIS: VT-driven. eco_resize_gate to the SL variant. Cheapest move available;
+    reliable 2-5ps gain per swap with near-zero cascade. Always try VT swaps first.
+
+New diagnostic category — slew-source-with-unfixable-upstream:
+  A stage qualifies when ALL of the following hold:
+    - This stage's out_slew_ps is anomalously large (>50 ps is a strong
+      signal; >80 ps almost always qualifies) given its load_cap_ff.
+      Compare to <cell_delay_reference>'s out_slew at this cell's (load, is)
+      row — if reality is 2x+ higher than reference, the cell is pumping
+      a degraded edge that won't self-clean.
+    - This stage's cell's upstream remedies are EXHAUSTED:
+        upsize=[] (no bigger drive variant in the lib for this cell type)
+        AND vt_swap=[] (already at the fastest VT, or no swap available)
+        AND the cell is unmodifiable for structural reasons (e.g. an adder
+        primitive — FA*, HA* — that synthesis won't allow restructuring).
+    - At least ONE downstream stage in the next 1-3 stages shows
+      cell_delay much larger than its Liberty (load, is=10ps) baseline,
+      i.e. its delay is inflated by the bad in_slew arriving from here.
+      Quantify: lookup downstream cell at (its load, is=10 ps) in
+      <cell_delay_reference>; compare to its current cell_delay_ps in
+      path[]. Gap > 10 ps is significant; gap > 20 ps is large.
+  DIAGNOSIS: SLEW-SOURCE — candidate for SLEW-CLEANUP buffer insertion on
+  the net between this stage and the next downstream cell. The buffer
+  reads the bad slew, drives a clean edge into the slew-sensitive
+  downstream chain, and recovers the inflated cell_delay there.
+  This is the ONE case where eco_insert_buffer is justified despite
+  the wire being short — the savings come from downstream slew
+  sensitivity, not wire shortening. See Candidate H in Step 5 for math.
+
+## STEP 5 — For each candidate move, do the cascade arithmetic
+An engineer never touches a cell without computing what the move does to:
+  A. The target stage's own delay (what we're trying to reduce)
+  B. The upstream driver's load (input_cap delta scales the upstream delay)
+  C. The path's wire delay (only changes for clone/buffer/remove, not for resize)
+  D. The slew downstream (a faster driver feeds a faster edge to the next stage)
+
+CANDIDATE A: eco_resize_gate place7071 BUFx8_ASAP7_75t_SL  (1.2: BUFx6f → BUFx8)
+  A. Δcell_delay on stage 1.2 — LOOK UP in <cell_delay_reference>:
+     Stage operating point: load_cap_ff=11.57, in_slew_ps=31.04 (from path[]).
+     BUFx6f_SL ic=1.297:
+       is=10: 8.1/9   11.0/15   17.2/26  ...
+       is=30: 11.0/12 13.3/17   19.5/27  ...   ← look here (is~30)
+     For load 11.57 between 5 and 15 ff: interpolate ~12.6 ps delay, ~16ps slew.
+     BUFx8_SL ic=0.915 same row (is=30): 9.8/12 12.6/16 ...
+     Bilinear at load=11.57, is=31: ~11.3 ps delay, ~14 ps slew.
+     → Δcell_delay = 11.3 − 12.6 = -1.3 ps  (slightly less than naive "−3ps")
+     Liberty-accurate prediction; do NOT guess scaling ratios.
+  B. Upstream load delta:
+     Look up input_caps from the SL drive ladder for BUF:
+       x6f ic=1.297, x8 ic=0.915 → Δic = -0.382 ff (cap-DECREASING upsize)
+     Upstream stage 1.1 (DFFHQNx3_SL) sees that drop → its delay also drops
+     slightly. Estimate +0.3 ps upstream (DFF is robust to small load changes).
+  C. Wire delay unchanged (same net, same routing, no new instances).
+  D. out_slew: 16ps → 14ps (Liberty lookup). Next stage 1.3 (in_slew=24.85ps
+     → ~22ps post-fix) sees slightly cleaner edge; downstream cell delay
+     drops by ~0.5 ps.
+  Net Δslack: +1.3 + 0.3 + 0.5 = +2.1 ps on path 1 (LIBERTY-DERIVED estimate)
+  Shared-prefix: on_other_violating_paths = 4 → effective TNS gain ~8 ps
+  E. SIBLING-TIP CHECK — look up `place7071` in shared_cells_to_nearby:
+     if entry exists with worst_nearby_slack_ps near WNS (e.g. -76.5 when
+     WNS=-78.5), this upsize might shift the upstream load just enough to
+     tip the nearby path. Quantify:
+       Candidate A is cap-DECREASING (Δic = -0.382 ff). Upstream load
+       REDUCES — nearby paths through the upstream cone get FASTER, not
+       slower. Sibling-tip risk: essentially ZERO for cap-decreasing
+       upsizes. ✓ SAFE.
+     If the upsize were cap-INCREASING (e.g. AO21x1 → AO21x2 with +0.002 ff),
+     the same check would compare predicted ΔWNS_target against the
+     worst_nearby_slack_ps headroom before committing.
+  COST: 1 command. SAFETY: input_cap decreases, upstream is faster, no cascade.
+
+CANDIDATE B: eco_clone_gate_worst_half place7069  (1.3: split fanout 10 → 5+5)
+  A. Original cell_d = 23.34ps at load 17.17ff. After clone each driver sees
+     ~half load (~8.5ff). For BUFx8, cell_d at 8.5ff ≈ 12-14ps → Δ ≈ -10ps
+  B. UPSTREAM (place7071/Y at stage 1.2) — currently drives input_cap of
+     place7069 only (~0.915ff). After clone it drives BOTH place7069 AND
+     eco_clone_place7069 inputs → load DOUBLES from 0.915 → 1.83ff.
+     place7071's cell_delay increases by K2 × 0.915ff ≈ +1.5ps.
+  C. Wire delay: the original 29.43um wire is replaced by two ~half-length
+     wires (one per clone), each driving ~5 sinks. Each new wire_d ≈ 5-6ps
+     (vs original 11.57). Δwire ≈ -5ps for the moved sinks; the other half
+     still sees the original ~11.57 → mixed. Net effect on path 1: depends on
+     which half its sink falls into. Worst case +0 wire change.
+  D. out_slew on clone branches improves; next stage cascade ≈ -1ps
+  Net Δslack: +10 (cell) -1.5 (upstream) +0 (wire, best case) +1 (slew) = +9.5ps
+  COST: 1 command (clone). SAFETY: structural move; must run in ISOLATION
+  (no other commands this iter). Predict generously then OBSERVE before stacking.
+  CALIBRATION WARNING: from <prediction_calibration>, clone predictions have
+  averaged 5-20x optimistic. Derate +9.5 → +1-2ps actual is more realistic.
+
+CANDIDATE C: eco_resize_gate _31348_ AND3x2_ASAP7_75t_SL  (1.8: L → SL VT swap)
+  A. Δcell_delay: L→SL on same drive strength typically -2 to -5ps. Conservative -3ps.
+  B. Upstream load: input_cap goes from 0.614ff (L) to 0.638ff (SL). +0.024ff.
+     Negligible (less than 5% of any reasonable upstream load) → ~0ps cascade
+  C. No wire change
+  D. No meaningful slew change
+  Net Δslack: +3ps on path 1
+  Same shared cone? Need to check stage 1.8's on_other_violating_paths.
+  If oovp=4 → +12ps effective TNS. If oovp=1 → +3ps TNS only.
+
+CANDIDATE D: eco_resize_gate _31350_ INVx1_ASAP7_75t_SL  (1.11: L → SL)
+  Same arithmetic as C. ~+2-3ps with negligible cascade.
+
+CANDIDATE E: eco_resize_gate _19545_ AO22x1_ASAP7_75t_SL  (1.12: L → SL)
+  Same arithmetic. ~+2-3ps.
+
+CANDIDATE F: eco_insert_buffer on the 29um wire at stage 1.3
+  Insert BUFx8 (cell_delay at this load ≈ 12ps; input_cap = 0.915ff).
+  Removes ~half the wire_d for sinks moved behind the new buffer: Δwire = -6ps.
+  BUT adds the buffer's intrinsic cell_delay: +12ps.
+  Net for those sinks: -6 +12 = +6ps WORSE than original.
+  DECISION: REJECT — buffer's intrinsic delay exceeds the wire delay we save.
+  Rule of thumb (the user's engineering principle):
+    "If buffer_delay > load_contribution_it_drives, the buffer is unnecessary."
+    Here buffer_delay (12) > wire_saving (6) → DON'T insert.
+
+CANDIDATE G: eco_remove_buffer place7068  (1.4: BUFx6f, moderate load — tricky case)
+  Removal-candidate check (the 3 conditions from AGENTS.md):
+    load_cap = 3.70 ff   (FAILS: > 2.0 ff threshold)
+    cell_delay = 18.54 ps (passes)
+    fanout = 4            (FAILS: > 2)
+  At fanout=4 and load=3.7 ff, this buffer is actively isolating slew for 4 sinks.
+  Removing it sends the upstream 41 ps in_slew downstream uncleaned → slew-cascade
+  penalties on stages 1.5, 1.6.
+  DECISION: SKIP — load and fanout both above the safe-removal thresholds.
+
+CANDIDATE G2: eco_remove_buffer output1902  (last stage: BUFx2_SL driving primary output)
+  Removal-candidate check:
+    load_cap = 0.47 ff   (passes: < 2.0)
+    cell_delay = 13.71 ps (passes: > 10)
+    fanout = 1            (passes: <= 2)
+  All three conditions met — strong removal candidate.
+  Cascade arithmetic:
+    A. Δcell_delay: -13.71 ps (buffer fully removed from path)
+    B. Upstream (the cell driving output1902/A) sees +0.47 ff load
+       minus the buffer's removed input_cap (~0.290 ff for BUFx2_SL)
+       Net upstream Δload = +0.18 ff   (tiny)
+       Upstream cell_delay penalty: ~K2 × 0.18 ff ≈ +0.5 ps
+    C. No wire delay change (no net topology change; sinks already on direct net)
+    D. Out_slew at the primary output: upstream now drives it directly. If upstream
+       is a reasonable-strength cell, out_slew degrades modestly (maybe +5-10 ps)
+       but PRIMARY OUTPUTS don't have downstream cells to cascade-poison.
+  Net Δslack: +13.71 - 0.5 = +13.2 ps (raw Liberty estimate)
+  Calibration: structural moves bucket is `no data` or thin → trust raw with 5x
+  pessimism → honest estimate +13.2 / 5 = +2.6 ps.
+  COST: 1 command (structural-isolation rule: this iter contains only removes).
+  SAFETY: output1902 drives only the output port (load=0.47 ff). Upstream load
+  barely changes. No downstream cell to poison via slew cascade. This is a
+  physically safe removal.
+  COMMIT this move.
+
+  Note: 5 of the path 1 output-stage buffers (output1902/4/5/12/15) and one
+  chain-end buffer (place6381 BUFx3, fanout=2, load=1.43 ff, cd=14.33 ps) all
+  meet the three removal conditions. Commit one per iter (structural-isolation)
+  so each removal's actual ΔWNS can be measured cleanly in next iter's
+  <previous_target_path>.
+
+CANDIDATE H: eco_insert_buffer for SLEW CLEANUP  (worked example)
+  When it applies: STEP 4 flagged an unfixable slew SOURCE (upstream cell has
+  upsize=[] AND vt_swap=[] — e.g. an FA/HA, a dont_touch hardmacro, or a tiny
+  logic cell at the smallest drive in the library) whose out_slew is bad
+  (>= 40 ps) AND that slew is feeding 2+ slew-sensitive downstream stages
+  (FA, HA, complex AOI/OAI, AND/OR3-4-5, INV/BUF) whose cell_delay is inflated.
+
+  DO NOT confuse with Candidate F. F handles a long wire (wire_delay > buffer
+  intrinsic; you insert a buffer to SHORTEN the wire RC). H handles a clean wire
+  but a degraded EDGE (you insert a buffer to REGENERATE the slew). The trigger
+  data is different — H fires when wire_length is short (< 20 um) but in_slew
+  is large because the upstream cell's out_slew is intrinsically degraded.
+
+  Worked numbers (real Liberty values from <cell_delay_reference>):
+
+    Upstream:  HAxp5_SL (an adder primitive, unfixable: upsize=[], vt_swap=[])
+               Stage delay 42.5 ps, OUT_SLEW = 54 ps  ← the dirty edge
+
+    Direct path (NO buffer inserted):
+      Stage k+1: INVx2_SL  load=2.5 ff, in_slew=54 ps
+        Liberty INVx2_SL @ (2.5 ff, is=80): cd ≈ 12.5 ps, out_slew ≈ 30 ps
+        Liberty INVx2_SL @ (2.5 ff, is=30): cd ≈ 8.5 ps,  out_slew ≈ 21 ps
+        Linear interp at is=54:           cd ≈ 10.3 ps, out_slew ≈ 25 ps
+      Stage k+2: NAND2x2_SL load=2.0 ff, in_slew=25 ps (cleaner now, but still tax)
+        Liberty cd ≈ 8.6 ps (at clean is=10 it would be ≈ 7.2 ps)
+      Stage k+3: AOI21x1_SL load=1.8 ff, in_slew=22 ps (still slightly degraded)
+        Liberty cd ≈ 13.0 ps (at clean is=10 it would be ≈ 11.4 ps)
+      Total cd over the 3 downstream stages: 10.3 + 8.6 + 13.0 = 31.9 ps
+
+    Inserted-buffer path:  insert BUFx4f_SL between HAxp5 and INVx2
+      BUFx4f_SL @ (L_buf_out = INVx2.ic ≈ 1.07 ff + small wire ≈ 1.5 ff, is=54 ps):
+        Liberty BUFx4f_SL @ (1.5 ff, is=30): cd = 15.3 ps, out_slew = 7 ps
+        Liberty BUFx4f_SL @ (1.5 ff, is=80): cd = 20.5 ps, out_slew = 10 ps
+        Linear interp at is=54: cd ≈ 17.8 ps, OUT_SLEW ≈ 8 ps  ← clean!
+      Now INVx2_SL sees in_slew=8 ps (clean):
+        Liberty INVx2_SL @ (2.5 ff, is=10): cd ≈ 6.6 ps, out_slew ≈ 11 ps
+      NAND2x2_SL sees in_slew=11 ps (still clean):
+        Liberty cd ≈ 7.2 ps
+      AOI21x1_SL sees in_slew=~10 ps:
+        Liberty cd ≈ 11.4 ps
+      Total cd over inserted buffer + 3 downstream stages: 17.8 + 6.6 + 7.2 + 11.4
+                                                         = 43.0 ps
+
+    Net comparison:
+      Direct:    31.9 ps
+      Inserted:  43.0 ps
+      Net Δ:     +11.1 ps WORSE  ← insertion LOSES here even with 3 downstream sinks
+
+    DECISION: REJECT for this 3-sink case. The slew penalty on the INSERTED buffer
+    (~18 ps at in_slew=54 ps) exceeds the slew-tax savings on 3 downstream cells
+    (~6 ps total). For BUFx4f_SL to pay off, you need either:
+      (a) 5+ downstream slew-sensitive stages reached before slew degrades again
+          (rare in practice), OR
+      (b) Downstream stage 1 is an FA/HA chain with multiple stages whose
+          cell_delay drops ≥ 10 ps each when in_slew goes 54 → 8 ps
+          (Liberty FA D(is=80) − D(is=10) gap is the deciding number).
+
+  Variant H2 (when H DOES commit): the upstream slew source feeds an FA→FA→HA
+  chain (3 adder primitives in a row, all paying steep K1 slew tax).
+    If FAx1 at (load=1.5 ff, is=10) gives cd≈A and FAx1 at (load=1.5 ff, is=80)
+    gives cd≈B with B − A ≥ 12 ps (look up your actual numbers — FA cells often
+    show 20-30 ps spread), then cleaning the slew at the chain head saves
+    ≥ 3 × 12 = 36 ps downstream while paying ~18 ps for the inserted buffer.
+    Net ≈ +18 ps. THAT case COMMITS — and it is the case to look for whenever
+    you see a multi-stage FA/HA run with consistently high in_slew (≥ 40 ps).
+
+  Commit checklist (before emitting an eco_insert_buffer for slew cleanup):
+    1. Upstream slew source has upsize=[] AND vt_swap=[] (otherwise fix
+       upstream — cleaner; no new cell on the path).
+    2. Upstream out_slew_ps ≥ 40 ps (no point cleaning a 25 ps edge).
+    3. At least 3 downstream slew-sensitive cells whose Liberty rows show
+       D(is=80) − D(is=10) ≥ 8 ps each (cells that pay the slew tax heavily).
+    4. Liberty lookup for chosen BUF at (L_buf_out, in_slew) shows out_slew
+       ≤ 15 ps (if buffer is too small for in_slew, its out_slew stays dirty —
+       escalate to BUFx6f/x8/x12 or skip).
+    5. Computed Σ ΔD_k > B_d + 5 ps headroom for calibration uncertainty.
+    6. PREVIOUS NEGATIVE ATTEMPTS DO NOT BLOCK THIS MOVE if any commit
+       checklist condition above has flipped since the prior attempt (different
+       BUF size; different target net; downstream chain composition changed).
+       State explicitly in Why-vs-alternatives WHICH checklist item differs
+       from the prior rejection.
+
+  Tcl recipe pattern (the inserted buffer's NAME must be unique in the
+  netlist — prefix with eco_slewclean_ to avoid collisions):
+
+    set _net [get_name [get_nets -of_objects [get_pins {<slew_src>/Y_or_SN}]]]
+    eco_insert_buffer $_net <slew_src>/<output_pin> <BUF_cell> \
+        eco_slewclean_<unique_tag> -at centroid
+
+  Structural-isolation: counts as a structural move. Emit ONLY this command
+  (or this + one other on the same net) per iter so its actual ΔWNS can be
+  measured cleanly in next iter's <previous_target_path>. NO concurrent
+  eco_resize_gate on the same path.
+
+## STEP 5.5 — Batch-interaction math (if proposing >=2 moves)
+After computing per-move Δslack, do NOT just sum them for the iter ΔWNS.
+WNS = the slack of the worst-violating endpoint (the most-negative signed
+slack across all paths). Once you push the rank-1 path past the rank-2
+path slack, the rank-2 path becomes the new WNS holder and further gains
+on the original rank-1 only help TNS, not WNS.
+
+Three effects to apply when batching moves:
+
+(A) WNS-SATURATION (the dominant one):
+    - Look at <iteration_context> path[1].slack_ps and path[2].slack_ps.
+      The DIFFERENCE is your max headroom for same-cone gains. e.g.:
+          path[1].slack_ps = -275.81  path[2].slack_ps = -274.66
+          headroom = |path[1] - path[2]| = 1.15 ps
+      Even if 4 swaps individually predict +3 ps each (sum = +12 ps), your
+      WNS gain this iter is capped at ~+1.15 ps. The remaining +10.85 ps
+      lands in TNS only (cleans up path 1 further but does not move WNS).
+    - Saturated batch ΔWNS = MIN(sum_of_per_move_deltas, headroom_to_path2)
+    - (Don't confuse: <nearby_endpoints> starts at rank 6 — path[2] is in
+      <iteration_context> detailed path[] block, NOT in nearby_endpoints.)
+
+(B) CASCADE COMPOUNDING (occasional bonus):
+    - If two adjacent VT swaps both target path 1: swap A produces cleaner
+      out_slew, swap B then sees a better in_slew (look in
+      <cell_delay_reference>: same load, lower in_slew → lower cell_delay).
+      This means swap B actual gain may EXCEED its solo prediction.
+    - This is positive noise — gives a 10-30% bonus on top of saturated cap.
+
+(C) LOAD CASCADE (cap-INCREASING upsize batches — danger zone):
+    - N upsizes on the same upstream chain each add Δinput_cap.
+    - Cumulative upstream load delta = sum of Δic across upsizes sharing
+      an upstream driver.
+    - Upstream cell_delay penalty ≈ K2 × cumulative_Δic. For BUFx, K2~3-5 ps/ff.
+    - If cumulative Δic > 1 ff on a shared upstream, the batch can NET NEGATIVE.
+    - Cap-DECREASING upsizes (e.g. BUFx6f → BUFx8 has lower input_cap) are
+      the inverse: cumulative cap reduces upstream load → bonus.
+
+Worked example (the 4-swap batch from Candidate A + C/D/E):
+  Per-move Liberty Δslack: +2.1 (A) +3 (C) +3 (D) +3 (E) = +11.1 ps raw sum.
+  Hypothetical tight-headroom case (NOT this example's numbers; here
+  path[1]=-285.55, path[2]=-284.74 so headroom is only ~0.8 ps): suppose
+  path[1].slack=-78.5, path[2].slack=-76.5 → headroom = |-78.5-(-76.5)| = 2.0 ps.
+  Saturated batch ΔWNS = MIN(+11.1, +2.0) = +2.0 ps.
+  The other +9.1 ps lives in TNS — cleans up path 1 behind WNS-rank-1 but
+  does not move WNS further.
+  Apply calibration from <prediction_calibration>. If bucket
+  `eco_resize_gate (batch_4+)` shows mean_ratio=0.04 →
+    honest ΔWNS = +2.0 × 0.04 = +0.08 ps.
+  If that is below the cost-benefit gate, ROTATE to picking one cell per
+  path[1..5] instead — same 4 swaps, different cones, additive WNS.
+
+Rule of thumb:
+  N moves on the SAME cone   ≈ headroom-to-path2 (saturated, then derated)
+  N moves on DIFFERENT cones ≈ N × per-move (additive, full per-move ratio)
+So a 4-swap batch on 4 different paths is typically 3-5× better than 4 swaps
+on the same path — at the same Liberty-computed raw sum.
+
+## STEP 6 — Cost/benefit comparison and final pick
+Rank by (expected Δslack × shared-cone multiplier × confidence / risk):
+
+  Candidate            move type     pred Δslack (path1)   shared cone mult     confidence
+  A place7071→BUFx8    resize         +2.1 ps              ×4 (shared)          high
+  B clone place7069    structural     +9.5 ps (derated +2) ×4 (shared)          LOW (cascade volatile)
+  C _31348_ VT swap    resize         +3 ps                ×4 if shared         very high
+  D _31350_ VT swap    resize         +2-3 ps              ×4 if shared         very high
+  E _19545_ VT swap    resize         +2-3 ps              ×4 if shared         very high
+  F insert_buffer 1.3  structural     -6 ps  (REJECT)      —                    —
+  G remove place7068   structural     +15ps (uncertain)    ×4                   medium (slew risk)
+
+Decision: pick A + C + D + E (4 commands, all eco_resize_gate, all high
+confidence, all on shared cone). Skip B (clone predictions historically wrong),
+skip F (arithmetic shows it loses), skip G (slew-cascade risk warrants a query
+tool before committing).
+
+This is a pure-resize iter (no structural moves), so MAX_COMMANDS budget can
+go higher. But 4 carefully-justified moves > 5 less-justified ones — keep it tight.
+
+## STEP 7 — Write the predictions HONESTLY and emit the Tcl recipe
+In the Move plan table the Δslack est. must be the model's BEST GUESS for the
+actual measured ΔWNS (not the cascade-arithmetic raw number). Apply calibration:
+
+  Calibration block (from prior iters) shows resize ratio ≈ 0.06.
+  So raw_estimate × 0.06 = honest_prediction
+    A: +2.1 raw → +0.1 honest (but VT swaps & cap-decreasing upsizes calibrate
+                                better; use 0.4 ratio → +0.8 honest)
+    C/D/E: +3 raw VT-swap → ×0.4 (better calibration) → +1.2 honest each
+  Predicted WNS gain this iter: ~0.8 + 1.2 + 1.2 + 1.2 = ~4.4 ps
+  If actual comes back at +1 ps total → resize calibration is even worse than
+  0.4 — record and derate further next iter.
+
+## Tcl recipe (the actual commands to emit)
+```tcl
+eco_resize_gate place7071 BUFx8_ASAP7_75t_SL
+eco_resize_gate _31348_ AND3x2_ASAP7_75t_SL
+eco_resize_gate _31350_ INVx1_ASAP7_75t_SL
+eco_resize_gate _19545_ AO22x1_ASAP7_75t_SL
+```
+
+## STEP 8 — After re-timing, audit the prediction
+On the NEXT iter, you will see in <previous_target_path> the same path
+re-reported. Compare:
+
+  - Did stage 1.2's cell_delay drop from 18.75 to ~17.4 as predicted (Δ≈-1.3)?
+      If yes: candidate A's prediction was accurate. Keep using this reasoning.
+      If no (e.g., still 17): the BUFx8 vs BUFx6f scaling ratio was wrong for
+      this load regime. Update mental model.
+  - Did the path's overall slack improve by the predicted ~4.4ps?
+      If yes: confidence in the cascade arithmetic holds.
+      If much less: the next-stage slew/cascade was not what was assumed.
+  - Did any sibling path move? Check siblings[] vs prior iter.
+
+This audit is what closes the learning loop. Without it, you predict from
+memorized formulas forever and never adapt to THIS design's actual response.
+
+## ANTI-PATTERNS — do NOT do these
+A. Don't downgrade VT in a resize. _SL → _L is a slowdown, never useful for
+   setup-WNS recovery. (Iter 16 of a prior run did this by accident, lost 12ps.)
+
+B. Don't clone a clone. Targets starting with "eco_clone_" are already split;
+   further cloning just adds more buffer instances to the chain.
+
+C. Don't clone a buffer (BUFx*, INVx*). A buffer's job is to drive load;
+   cloning ADDS a new buffer cell delay to half the paths. Upsize the buffer
+   instead (more drive strength → faster) if its load is too high.
+
+D. Don't batch a structural move with resizes. If you emit eco_insert_buffer
+   or eco_clone_gate_worst_half or eco_remove_buffer, that iter contains
+   ONLY structural moves so you can attribute the ΔWNS cleanly next iter.
+
+E. Don't trust your raw predictions. The <prediction_calibration> block shows
+   your historical ratio. If it's 0.05, your "+10ps" prediction is really
+   "+0.5ps" — derate before deciding if a move is worth emitting.
+
+F. Trust the dont_touch column in path[] — it is the authoritative source.
+   A cell is untouchable if AND ONLY IF dont_touch=true in its path[] row.
+   Do NOT infer "untouchable" from the hierarchical name (e.g. paths through
+   HAN_CARLSON / KOGGE_STONE / BRENT_KUNG adders contain many NORMAL cells
+   with dont_touch=false that CAN be modified when their upsize/vt_swap
+   columns show options). Per-row columns decide availability, not naming —
+   see AGENTS.md (ARITHMETIC PRIMITIVE RULE) for the column semantics.
+
+   Genuinely untouchable cells (will have dont_touch=true in path[]):
+     - All DFF/LATCH (is_dff=true)
+     - Clock buffers / clock-tree cells (per netlist + dont_touch flag)
+     - Black-box macros (SRAM, IP blocks)
+     - User-specified dont_touch instances (set by synthesis constraints)
+   For these: skip categorically. For everything else, trust the columns.
