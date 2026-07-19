@@ -5,18 +5,6 @@ agent. It closes setup-timing violations on a routed design by iterating a
 closed loop between [EDA tool](https://github.com/The-OpenROAD-Project/OpenROAD)
 and a large language model (Anthropic Claude, via the `claude` CLI):
 
-```
-          ┌──────────────────────────────────────────────────────────┐
-          │                      per iteration                        │
-          │                                                           │
-  EDA tool ──► timing report + node/net/parasitic context ──► LLM     │
-    ▲                                                          │      │
-    │                                                          ▼      │
-    └────────── incremental place + route + STA ◄── ECO Tcl (resize / │
-               (score QoR, keep best, revert on regress)  buffer /    │
-                                                           clone)      │
-          └──────────────────────────────────────────────────────────┘
-```
 
 Each iteration the orchestrator builds a compact, token-efficient context
 (worst timing paths, sibling slacks, fanout ranks, per-stage cell-vs-wire
